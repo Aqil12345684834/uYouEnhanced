@@ -95,9 +95,25 @@ jobs:
         run: |
           git clone --quiet -n --depth=1 --filter=tree:0 https://github.com/aricloverALT/sdks/
           cd sdks
+          # List available SDKs
+          echo "==> Available SDKs in repository:"
+          git ls-tree -r --name-only HEAD | grep "\.sdk$" | head -10
+          
+          # Try to checkout the requested SDK
           git sparse-checkout set --no-cone iPhoneOS${{ inputs.sdk_version }}.sdk
           git checkout
+          
+          # Check if the SDK was found
+          if [ ! -d "iPhoneOS${{ inputs.sdk_version }}.sdk" ]; then
+            echo "==> Error: SDK iPhoneOS${{ inputs.sdk_version }}.sdk not found!"
+            echo "==> Available SDKs:"
+            git ls-tree -r --name-only HEAD | grep "\.sdk$"
+            exit 1
+          fi
+          
           mv *.sdk $THEOS/sdks
+          # Verify SDK was downloaded correctly
+          ls -la $THEOS/sdks/
         env:
           THEOS: ${{ github.workspace }}/theos
 
@@ -141,9 +157,53 @@ jobs:
         id: build_package
         run: |
           cd ${{ github.workspace }}/main
+          # Debug: Show current Makefile TARGET before modification
+          echo "==> Current TARGET line in Makefile:"
+          head -n 1 Makefile
+          
+          # Clean any previous build artifacts
+          make clean || true
+          
+          # Modify main Makefile with correct SDK version
           sed -i '' "30s#.*#BUNDLE_ID = ${{ env.BUNDLE_ID }}#g" Makefile                          # Modify the bundle ID
           sed -i '' "29s#.*#DISPLAY_NAME = ${{ env.APP_NAME }}#g" Makefile                        # Modify the app name
           sed -i '' "1s#.*#export TARGET = iphone:clang:${{ inputs.sdk_version }}:14.0#g" Makefile # Modify the SDK version
+          
+          # Update SDK version in all submodule Makefiles and any hardcoded references
+          echo "==> Updating SDK versions in all Makefiles..."
+          find Tweaks -name "Makefile" -print
+          find Tweaks -name "Makefile" -exec sed -i '' "s/iphone:clang:[0-9.]*:/iphone:clang:${{ inputs.sdk_version }}:/g" {} \; || true
+          find Tweaks -name "control" -exec sed -i '' "s/iPhoneOS[0-9.]*.sdk/iPhoneOS${{ inputs.sdk_version }}.sdk/g" {} \; || true
+          
+          # Fix any hardcoded SDK references in .xm, .h, or other files
+          echo "==> Searching for hardcoded SDK references..."
+          grep -r "16\.2" Tweaks/ || echo "No 16.2 references found"
+          grep -r "iPhoneOS.*\.sdk" Tweaks/ || echo "No iPhoneOS SDK references found"
+          find Tweaks -type f \( -name "*.xm" -o -name "*.h" -o -name "*.m" -o -name "*.mm" \) -exec sed -i '' "s/iPhoneOS[0-9.]*\.sdk/iPhoneOS${{ inputs.sdk_version }}.sdk/g" {} \; || true
+          
+          # Specifically fix YTHoldForSpeed if it exists
+          if [ -d "Tweaks/YTHoldForSpeed" ]; then
+            echo "==> Fixing YTHoldForSpeed SDK references..."
+            ls -la Tweaks/YTHoldForSpeed/
+            find Tweaks/YTHoldForSpeed -type f -exec sed -i '' "s/16\.2/${{ inputs.sdk_version }}/g" {} \; || true
+            find Tweaks/YTHoldForSpeed -type f -exec sed -i '' "s/iphone:clang:[0-9.]*:/iphone:clang:${{ inputs.sdk_version }}:/g" {} \; || true
+          fi
+          
+          # Set explicit environment variables for the build
+          export TARGET="iphone:clang:${{ inputs.sdk_version }}:14.0"
+          export SDKVERSION="${{ inputs.sdk_version }}"
+          
+          # Debug: Show modified TARGET line
+          echo "==> Modified TARGET line in Makefile:"
+          head -n 1 Makefile
+          
+          # Debug: Verify SDK exists
+          echo "==> Available SDKs in theos/sdks/:"
+          ls -la $THEOS/sdks/
+          
+          # Build the package
+          export SDKVERSION=${{ inputs.sdk_version }}
+          export THEOS_DEVICE_IP=
           make package THEOS_PACKAGE_SCHEME=rootless IPA=Payload/YouTube.app FINALPACKAGE=1
           echo "package=$(ls -t packages | head -n1)" >>$GITHUB_OUTPUT
           echo -e "==> \033[1mSHASUM256: $(shasum -a 256 packages/*.ipa | cut -f1 -d' ')\033[0m"
